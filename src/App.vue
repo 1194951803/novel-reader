@@ -126,17 +126,39 @@ function selectChapter(index) { saveReaderProgress(); activeChapter.value = inde
 function changeChapter(offset) { const next = activeChapter.value + offset; if (next >= 0 && next < activeBook.value.chapters.length) selectChapter(next); }
 function toggleBookmark() { bookmark.value = !bookmark.value; saveReaderProgress(); }
 function escapeText(value) { return value.replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char])); }
+// Chapter headings vary a lot between TXT sources: 第18章 / 第 18 章 / 【第18章】 / 第两千章 /
+// 1 第 1 章 / 第一部 策划 第01章 / 145 番外十一 / 第一卷 风起 / Chapter 18.
+const CHAPTER_NUMBER = '[0-9０-９零〇一二三四五六七八九十百千万两]';
+const CHAPTER_HEADING_PATTERNS = [
+  new RegExp('^[【\\[（(]?\\s*第\\s*' + CHAPTER_NUMBER + '{1,12}\\s*[章节回篇]'),
+  new RegExp('^[【\\[（(]?\\s*(?:\\d{1,5}|第\\s*' + CHAPTER_NUMBER + '{1,12}\\s*[卷部篇集])\\s*[.、:：\\-—]?\\s*(?:[^\\s]{1,8}\\s*)?第\\s*' + CHAPTER_NUMBER + '{1,12}\\s*[章节回篇]'),
+  new RegExp('^[【\\[（(]?\\s*(?:\\d{1,5}\\s*[.、:：\\-—]?\\s*)?(?:序章|序言|楔子|引子|前言|后记|尾声|终章|终篇|大结局|结局|番外|外传|附录|卷首语|作者的话)'),
+  new RegExp('^[【\\[（(]?\\s*(?:\\d{1,5}\\s*[.、:：\\-—]?\\s*)?第\\s*' + CHAPTER_NUMBER + '{1,12}\\s*[卷部篇集](\\s|[.、:：\\-—]|$)'),
+  /^(?:chapter|ch\.)\s*[0-9０-９]{1,8}\b/i
+];
+function isChapterHeading(line) {
+  if (!line || line.length > 60) return false;
+  return CHAPTER_HEADING_PATTERNS.some((pattern) => pattern.test(line));
+}
 function parseTxt(text, fileName) {
   const lines = text.replace(/\r/g, '').split('\n').map((line) => line.trim()).filter(Boolean);
   const title = fileName.replace(/\.txt$/i, '') || '未命名小说';
-  const chapterPattern = /^(第\s*[零〇一二三四五六七八九十百千万\d]+\s*[章节回篇].*|Chapter\s+\d+.*|番外.*|序章.*|尾声.*)$/i;
   const chapters = []; let current = null;
-  lines.forEach((line) => { if (chapterPattern.test(line)) { if (current) chapters.push(current); current = { title: line, paragraphs: [] }; } else if (current) current.paragraphs.push(line); });
+  lines.forEach((line) => { if (isChapterHeading(line)) { if (current) chapters.push(current); current = { title: line, paragraphs: [] }; } else if (current) current.paragraphs.push(line); });
   if (current) chapters.push(current);
   if (!chapters.length) chapters.push({ title: '正文', paragraphs: lines.length ? lines : ['文件内容为空。'] });
   chapters.forEach((chapter) => { chapter.paragraphs = chapter.paragraphs.flatMap((paragraph) => paragraph.length <= 4000 ? [paragraph] : Array.from({ length: Math.ceil(paragraph.length / 4000) }, (_, index) => paragraph.slice(index * 4000, index * 4000 + 4000))); });
   const populatedChapters = chapters.filter((chapter) => chapter.paragraphs.length > 0);
   return { id: `book-${Date.now()}-${Math.random()}`, title, author: '导入文本', chapters: populatedChapters.length ? populatedChapters : chapters };
+}
+// A missing books/*.txt on a dev server often returns index.html (200) instead of 404,
+// so sniff the payload before treating it as a novel.
+function looksLikeNovelText(text) {
+  const head = text.slice(0, 400).trim().toLowerCase();
+  if (!head) return false;
+  if (head.startsWith('<!doctype html') || head.startsWith('<html')) return false;
+  if (head.includes('<script type="module"') && head.includes('</head>')) return false;
+  return true;
 }
 function decodeBuffer(buffer) { const bytes = new Uint8Array(buffer); if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(buffer).replace(/^\uFEFF/, ''); if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(buffer).replace(/^\uFEFF/, ''); try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer).replace(/^\uFEFF/, ''); } catch (error) { return new TextDecoder('gb18030').decode(buffer).replace(/^\uFEFF/, ''); } }
 async function decodeFile(file) { return decodeBuffer(await file.arrayBuffer()); }
@@ -172,9 +194,12 @@ async function loadBookIndex() {
       for (const name of names) {
         const result = await fetch(`books/${encodeURIComponent(name)}`, { cache: 'no-store' });
         if (result.ok) {
-          const book = parseTxt(decodeBuffer(await result.arrayBuffer()), name);
-          book.source = 'bundled';
-          if (!hiddenBookTitles.has(book.title)) loadedByTitle.set(book.title, book);
+          const text = decodeBuffer(await result.arrayBuffer());
+          if (looksLikeNovelText(text)) {
+            const book = parseTxt(text, name);
+            book.source = 'bundled';
+            if (!hiddenBookTitles.has(book.title)) loadedByTitle.set(book.title, book);
+          }
         }
       }
     }
